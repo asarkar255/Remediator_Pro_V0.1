@@ -8,11 +8,11 @@ import os, json, datetime
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
 if os.getenv("LANGCHAIN_API_KEY"):
     os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
-    
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY environment variable is required (no fallback).")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 # LangChain + OpenAI
 from langchain_openai import ChatOpenAI
