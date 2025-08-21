@@ -5,10 +5,14 @@ from typing import List, Dict, Any, Optional
 import os, json, datetime
 
 # ==== LLM is mandatory (no fallback) ====
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+if os.getenv("LANGCHAIN_API_KEY"):
+    os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
+    
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY environment variable is required (no fallback).")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # LangChain + OpenAI
 from langchain_openai import ChatOpenAI
@@ -105,7 +109,7 @@ def run_remediation(u: Unit) -> str:
 
 # ========= API =========
 @app.post("/remediate")
-def remediate(unit: Unit) -> Dict[str, Any]:
+async def remediate(unit: Unit) -> Dict[str, Any]:
     """
     Input JSON:
       {
