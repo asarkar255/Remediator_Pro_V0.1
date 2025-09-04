@@ -6,6 +6,5 @@ uvicorn
 langchain
 langchain_openai
 langchain_core
-langchain_chromadb
 langchain-community
 chromadb
