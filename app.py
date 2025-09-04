@@ -1,30 +1,47 @@
 # app_remediate_rag_chroma.py
-import os, json, datetime, re
+import os
+import json
+import datetime
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-# --- OpenAI / LangChain ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY is required")
-
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
-EMBED_MODEL  = os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-large")
-
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_chroma import Chroma
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
+# LangChain + OpenAI + Chroma
+from langchain_community.vectorstores import Chroma
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
 from langchain_core.documents import Document
-from langchain_core.output_parsers import JsonOutputParser
 
-# ========= FastAPI =========
-app = FastAPI(title="ABAP Remediator + RAG (Chroma, ECC-safe)", version="1.0")
+# =========================
+# Config (env)
+# =========================
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY environment variable is required.")
 
-# ========= Models =========
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # e.g., "gpt-5"
+CHROMA_DIR   = os.getenv("CHROMA_DIR", "chroma_rules")  # persisted vector store
+RAG_RULES_DIR= os.getenv("RAG_RULES_DIR", "rag_rules")  # put your rules *.txt/*.md here
+RAG_TOP_K    = int(os.getenv("RAG_TOP_K", "6"))
+RAG_REBUILD_ON_START = os.getenv("RAG_REBUILD_ON_START", "false").lower() == "true"
+
+# Optional LangSmith tracing (if you use it)
+if os.getenv("LANGCHAIN_API_KEY"):
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
+
+# =========================
+# FastAPI app
+# =========================
+app = FastAPI(
+    title="ABAP Remediator (LLM + Chroma RAG, PwC tagging)",
+    version="2.0"
+)
+
+# =========================
+# Models
+# =========================
 class Unit(BaseModel):
     pgm_name: str
     inc_name: str
@@ -34,108 +51,63 @@ class Unit(BaseModel):
     code: str
     llm_prompt: List[str] = Field(default_factory=list)
 
-# ========= RAG store (Chroma persistent) =========
-RAG_KB_DIR = os.getenv("RAG_KB_DIR", "knowledge")      # put .md, .txt, .pdf here
-RAG_INDEX_DIR = os.getenv("RAG_INDEX_DIR", "rag_index") # persistent directory
-RAG_COLLECTION = os.getenv("RAG_COLLECTION", "abap_syntax_rules")
-RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
+class RebuildResponse(BaseModel):
+    ok: bool
+    docs_indexed: int
+    persist_directory: str
 
-embeddings = OpenAIEmbeddings(model=EMBED_MODEL)
-vectorstore: Optional[Chroma] = None
-
-def _load_docs_from_dir(folder: str) -> List[Document]:
+# =========================
+# RAG helpers (Chroma)
+# =========================
+def _load_rule_docs() -> List[Document]:
+    rules_path = Path(RAG_RULES_DIR)
+    if not rules_path.exists():
+        raise RuntimeError(f"RAG rules directory '{RAG_RULES_DIR}' does not exist.")
     docs: List[Document] = []
-    if not os.path.isdir(folder):
-        return docs
-    for fname in os.listdir(folder):
-        path = os.path.join(folder, fname)
-        if not os.path.isfile(path):
-            continue
-        try:
-            if fname.lower().endswith((".md", ".txt")):
-                docs.extend(TextLoader(path, encoding="utf-8").load())
-            elif fname.lower().endswith(".pdf"):
-                docs.extend(PyPDFLoader(path).load())
-        except Exception as e:
-            print(f"[RAG] Skip {fname}: {e}")
+    for f in rules_path.glob("*.*"):
+        if f.suffix.lower() in {".txt", ".md"}:
+            txt = f.read_text(encoding="utf-8")
+            if txt.strip():
+                docs.append(Document(page_content=txt, metadata={"source": str(f)}))
     return docs
 
-def _new_chroma() -> Chroma:
-    os.makedirs(RAG_INDEX_DIR, exist_ok=True)
-    return Chroma(
-        collection_name=RAG_COLLECTION,
-        embedding_function=embeddings,
-        persist_directory=RAG_INDEX_DIR,
-    )
-
-def rebuild_rag_index() -> str:
-    """Recreates the Chroma collection from scratch using files in RAG_KB_DIR."""
-    global vectorstore
-    docs = _load_docs_from_dir(RAG_KB_DIR)
+def rebuild_rag_index() -> int:
+    docs = _load_rule_docs()
     if not docs:
-        raise RuntimeError(f"No docs found in {RAG_KB_DIR}. Add .md/.txt/.pdf files with ABAP rules.")
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=150)
-    chunks = splitter.split_documents(docs)
+        raise RuntimeError(f"No rule files found in '{RAG_RULES_DIR}'. Place *.txt/*.md rules there.")
+    embeddings = OpenAIEmbeddings()
+    # Overwrite existing index
+    Chroma.from_documents(documents=docs, embedding=embeddings, persist_directory=CHROMA_DIR)
+    return len(docs)
 
-    # Re-init a fresh collection
-    vectorstore = _new_chroma()
-    # Best-effort wipe existing collection by using unique ids (not strictly required)
-    # Chroma's add_texts will append; for a clean rebuild, we can recreate the directory.
-    # Here we remove the directory for a true rebuild.
-    try:
-        # Danger: fully delete existing index dir
-        import shutil
-        shutil.rmtree(RAG_INDEX_DIR, ignore_errors=True)
-    except Exception as e:
-        print(f"[RAG] Could not clear index dir, continuing: {e}")
+def _get_retriever():
+    embeddings = OpenAIEmbeddings()
+    vs = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+    return vs.as_retriever(search_kwargs={"k": RAG_TOP_K})
 
-    vectorstore = _new_chroma()
-    texts = [c.page_content for c in chunks]
-    metadatas = [c.metadata for c in chunks]
-    vectorstore.add_texts(texts=texts, metadatas=metadatas)
-    vectorstore.persist()
-    return f"Indexed {len(chunks)} chunks from {len(docs)} files."
-
-def load_rag_index() -> None:
-    """Loads the existing Chroma collection (if present); creates empty if missing."""
-    global vectorstore
-    try:
-        vectorstore = _new_chroma()
-        # If empty, .persist() keeps it consistent
-        vectorstore.persist()
-    except Exception as e:
-        print(f"[RAG] Failed to load/create Chroma index: {e}")
-        vectorstore = None
-
-load_rag_index()
-
-def retrieve_rules(query: str, k: int = RAG_TOP_K) -> List[str]:
-    if not vectorstore:
-        return []
-    try:
-        hits = vectorstore.similarity_search(query, k=k)
-        return [h.page_content.strip() for h in hits if h and h.page_content]
-    except Exception as e:
-        print(f"[RAG] retrieval failed: {e}")
-        return []
-
-# ========= LLM prompt with RAG =========
+# =========================
+# LLM prompt (strict JSON)
+# =========================
 SYSTEM_MSG = (
-    "You are a precise ABAP remediation engine for ECC syntax. "
-    "Use the provided ABAP rules as authoritative. Output STRICT JSON only."
+    "You are a precise ABAP remediation engine. "
+    "Use the retrieved rules verbatim. Follow the bullets in 'llm_prompt' exactly. "
+    "Return STRICT JSON only."
 )
 
 USER_TEMPLATE = """
-You will remediate ABAP code EXACTLY following 'llm_prompt'.
-Hard rules:
-- Replace legacy code per the prompts; keep behavior unchanged unless told otherwise.
-- Output the FULL remediated code (not a diff).
-- Every ADDED or MODIFIED line must include an inline ABAP comment at end of the line:
-  \" Added By Pwc{today_date}
-- Use strictly ECC-safe ABAP syntax (no pseudo comments, no @DATA inline if not ECC-safe).
-- Follow the ABAP rules below as authoritative.
+<retrieved_rules>
+{rules}
+</retrieved_rules>
 
-Return ONLY strict JSON with keys:
+Remediate the ABAP code EXACTLY following the bullet points in 'llm_prompt'.
+Rules you MUST follow:
+- Replace legacy/wrong code with corrected ABAP per the rules and bullets.
+- Output the FULL remediated code (not a diff).
+- Every ADDED or MODIFIED line must include an inline ABAP comment at the end of that line:  " Added By Pwc{today_date}
+  (Use a single double-quote ABAP comment delimiter.)
+- Keep behavior the same unless the bullets say otherwise.
+- Use ECC-safe syntax unless the bullets allow otherwise.
+- Return ONLY strict JSON with keys:
 {{
   "remediated_code": "<full updated ABAP code with PwC comments on added/modified lines>"
 }}
@@ -145,22 +117,13 @@ Context:
 - Include: {inc_name}
 - Unit type: {unit_type}
 - Unit name: {unit_name}
-- Today: {today_date}
-
-Authoritative ABAP rules (retrieved):
------
-{abap_rules}
------
+- Today's date (PwC tag): {today_date}
 
 Original ABAP code:
------
 {code}
------
 
-llm_prompt (exact remediation instructions):
------
+llm_prompt (bullets):
 {llm_prompt_json}
------
 """.strip()
 
 prompt = ChatPromptTemplate.from_messages(
@@ -170,94 +133,117 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
-parser = JsonOutputParser()
-
+# =========================
+# LLM runner
+# =========================
 def today_iso() -> str:
     return datetime.date.today().isoformat()
 
-# --- Simple sanity checks for ABAP (keep minimal & non-blocking) ---
-ABAP_BAD_PATTERNS = [
-    r"^\s*DATA\s*\(\w+\)\s*=",    # inline data declarations (not ECC-safe)
-    r"^\s*FIELD-SYMBOLS\s+<[^>]+>$",  # lonely field-symbols w/o period
-]
-def abap_sanity_hints(code: str) -> List[str]:
-    hints = []
-    lines = code.splitlines()
-    for i, ln in enumerate(lines, start=1):
-        for pat in ABAP_BAD_PATTERNS:
-            if re.search(pat, ln):
-                hints.append(f"Line {i}: Avoid modern inline / unsupported ECC syntax near: {ln.strip()[:80]}")
-        if ln.strip() and not ln.strip().endswith(".") and not ln.strip().startswith("*") and not ln.strip().startswith('"'):
-            # Many ABAP statements end with '.', but don't over-enforce (FUNCTION/FORM blocks etc.)
-            if re.match(r"^(DATA|PARAMETERS|SELECT|LOOP|READ|MOVE|CALL|IF|ELSEIF|ELSE|ENDIF|ENDLOOP|PERFORM|WRITE|FIELD-SYMBOLS|CONSTANTS|TABLES|TYPES)\b", ln.strip(), re.IGNORECASE):
-                hints.append(f"Line {i}: ABAP statement may require a period at end.")
-    return hints
+def _extract_json_str(s: str) -> str:
+    """
+    Best-effort extractor: some LLMs may wrap JSON in code fences.
+    """
+    t = s.strip()
+    if t.startswith("```"):
+        # remove leading fence
+        t = t.split("```", 2)
+        if len(t) == 3:
+            t = t[1] if not t[1].lstrip().startswith("{") else t[1]
+            # if a language hint exists (`json`), drop the first line
+            t = "\n".join(line for line in t.splitlines() if not line.strip().lower().startswith("json")).strip()
+        else:
+            t = s
+    return t.strip()
 
-def build_query_for_rag(u: Unit) -> str:
-    # Use prompt + short slice of code as retrieval query
-    lp = "\n".join(u.llm_prompt) if u.llm_prompt else ""
-    head = (u.code or "")[:2000]
-    return f"ABAP remediation rules for ECC; ensure correct SELECT, LOOP, MOVE, DATA declarations. Prompts:\n{lp}\nCode:\n{head}"
-
-def run_remediation(u: Unit) -> str:
-    if not u.llm_prompt:
+def remediate_with_rag(unit: Unit) -> str:
+    if not unit.llm_prompt:
         raise HTTPException(status_code=400, detail="llm_prompt must be a non-empty list of instructions.")
-    rules_snippets = retrieve_rules(build_query_for_rag(u), k=RAG_TOP_K)
-    abap_rules = "\n---\n".join(rules_snippets) if rules_snippets else "No rules retrieved. Use conservative ECC-safe ABAP."
 
+    # Retrieve top-k rule chunks
+    retriever = _get_retriever()
+    query = "ABAP syntax rules and remediation patterns for SELECT SINGLE, field lists, AFLE amount declarations, MATNR, etc."
+    chunks = retriever.get_relevant_documents(query)
+    rules_text = "\n\n---\n\n".join(d.page_content for d in chunks) if chunks else ""
+
+    llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
     payload = {
-        "pgm_name": u.pgm_name,
-        "inc_name": u.inc_name,
-        "unit_type": u.type,
-        "unit_name": u.name or "",
-        "code": u.code or "",
+        "rules": rules_text or "No rules retrieved.",
+        "pgm_name": unit.pgm_name,
+        "inc_name": unit.inc_name,
+        "unit_type": unit.type,
+        "unit_name": unit.name or "",
+        "code": unit.code or "",
         "today_date": today_iso(),
-        "llm_prompt_json": json.dumps(u.llm_prompt, ensure_ascii=False, indent=2),
-        "abap_rules": abap_rules
+        "llm_prompt_json": json.dumps(unit.llm_prompt, ensure_ascii=False, indent=2),
     }
+    msgs = prompt.format_messages(**payload)
+    resp = llm.invoke(msgs)
 
-    # Try a couple of times if JSON parsing fails
-    attempts, last_err = 2, None
-    for _ in range(attempts):
-        try:
-            out = (prompt | llm | parser).invoke(payload)
-            rem = out.get("remediated_code", "")
-            if not isinstance(rem, str) or not rem.strip():
-                raise ValueError("Model returned empty or invalid 'remediated_code'.")
-            return rem
-        except Exception as e:
-            last_err = e
-    raise HTTPException(status_code=502, detail=f"LLM remediation failed: {last_err}")
+    content = resp.content or ""
+    content = _extract_json_str(content)
+    try:
+        data = json.loads(content)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Model did not return valid JSON: {e}")
 
-# ========= API =========
-@app.post("/rebuild-index")
-def rebuild_index_endpoint():
-    msg = rebuild_rag_index()
-    return {"ok": True, "message": msg, "persist_directory": RAG_INDEX_DIR, "collection": RAG_COLLECTION}
+    rem = data.get("remediated_code", "")
+    if not isinstance(rem, str) or not rem.strip():
+        raise HTTPException(status_code=502, detail="Model returned empty or invalid 'remediated_code'.")
+    return rem
+
+# =========================
+# Endpoints
+# =========================
+@app.post("/rebuild-rag", response_model=RebuildResponse)
+def rebuild_rag():
+    count = rebuild_rag_index()
+    return RebuildResponse(ok=True, docs_indexed=count, persist_directory=str(Path(CHROMA_DIR).resolve()))
 
 @app.post("/remediate")
 def remediate(unit: Unit) -> Dict[str, Any]:
-    rem_code = run_remediation(unit)
-    hints = abap_sanity_hints(rem_code)
+    """
+    Input JSON:
+      {
+        "pgm_name": "...",
+        "inc_name": "...",
+        "type": "...",
+        "name": "",
+        "class_implementation": "",
+        "code": "<ABAP code>",
+        "llm_prompt": [ "...bullet...", "...bullet..." ]
+      }
+
+    Output JSON:
+      original fields + "rem_code": "<full remediated ABAP>"
+    """
+    rem_code = remediate_with_rag(unit)
     obj = unit.model_dump()
     obj["rem_code"] = rem_code
-    obj["sanity_hints"] = hints  # informational only
     return obj
-
-@app.post("/preview-rules")
-def preview_rules(unit: Unit) -> Dict[str, Any]:
-    snippets = retrieve_rules(build_query_for_rag(unit), k=RAG_TOP_K)
-    return {"ok": True, "top_k": RAG_TOP_K, "snippets": snippets}
 
 @app.get("/health")
 def health():
-    # Light probe: confirm Chroma can be opened/persisted
-    ok = vectorstore is not None
+    # check index presence
+    has_index = Path(CHROMA_DIR).exists() and any(Path(CHROMA_DIR).iterdir())
+    # check rules dir presence
+    rules_dir_exists = Path(RAG_RULES_DIR).exists()
     return {
-        "ok": ok,
+        "ok": True,
         "model": OPENAI_MODEL,
-        "embed_model": EMBED_MODEL,
-        "persist_directory": RAG_INDEX_DIR,
-        "collection": RAG_COLLECTION
+        "chroma_dir": str(Path(CHROMA_DIR).resolve()),
+        "rag_rules_dir": str(Path(RAG_RULES_DIR).resolve()),
+        "has_index": has_index,
+        "rules_dir_exists": rules_dir_exists,
+        "rag_rebuild_on_start": RAG_REBUILD_ON_START,
+        "rag_top_k": RAG_TOP_K,
     }
+
+# =========================
+# Optional: rebuild on start
+# =========================
+if RAG_REBUILD_ON_START:
+    try:
+        cnt = rebuild_rag_index()
+        print(f"[RAG] Index rebuilt on start with {cnt} docs in {CHROMA_DIR}")
+    except Exception as ex:
+        print(f"[RAG] Rebuild on start failed: {ex}. You can POST /rebuild-rag later.")
