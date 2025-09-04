@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field
 from langchain_community.vectorstores import Chroma
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.prompts import ChatPromptTemplate
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.document_loaders import TextLoader
 from langchain_core.documents import Document
 
 # =========================
@@ -24,7 +26,6 @@ if not OPENAI_API_KEY:
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # e.g., "gpt-5"
 CHROMA_DIR   = os.getenv("CHROMA_DIR", "chroma_rules")  # persisted vector store
 RAG_RULES_DIR= os.getenv("RAG_RULES_DIR", "rag_rules")  # put your rules *.txt/*.md here
-RAG_TOP_K    = int(os.getenv("RAG_TOP_K", "6"))
 RAG_REBUILD_ON_START = os.getenv("RAG_REBUILD_ON_START", "false").lower() == "true"
 
 # Optional LangSmith tracing (if you use it)
@@ -80,10 +81,10 @@ def rebuild_rag_index() -> int:
     Chroma.from_documents(documents=docs, embedding=embeddings, persist_directory=CHROMA_DIR)
     return len(docs)
 
-def _get_retriever():
-    embeddings = OpenAIEmbeddings()
-    vs = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
-    return vs.as_retriever(search_kwargs={"k": RAG_TOP_K})
+# def _get_retriever():
+#     embeddings = OpenAIEmbeddings()
+#     vs = Chroma(persist_directory=CHROMA_DIR, embedding_function=embeddings)
+#     return vs.as_retriever()
 
 # =========================
 # LLM prompt (strict JSON)
@@ -160,10 +161,17 @@ def remediate_with_rag(unit: Unit) -> str:
         raise HTTPException(status_code=400, detail="llm_prompt must be a non-empty list of instructions.")
 
     # Retrieve top-k rule chunks
-    retriever = _get_retriever()
-    query = "ABAP syntax rules and remediation patterns for SELECT SINGLE, field lists, AFLE amount declarations, MATNR, etc."
-    chunks = retriever.get_relevant_documents(query)
-    rules_text = "\n\n---\n\n".join(d.page_content for d in chunks) if chunks else ""
+    ruleset_loader = TextLoader("ruleset.txt")
+    documents = ruleset_loader.load()
+
+# Split Rules into Chunks
+    text_splitter = RecursiveCharacterTextSplitter(
+    # separators=["\n\n", "Rule"],
+    chunk_size=500,
+    chunk_overlap=0
+    )
+    docs = text_splitter.split_documents(documents)
+    rules_text =  "\n\n".join([doc.page_content for doc in docs])
 
     llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0.0)
     payload = {
@@ -234,8 +242,7 @@ def health():
         "rag_rules_dir": str(Path(RAG_RULES_DIR).resolve()),
         "has_index": has_index,
         "rules_dir_exists": rules_dir_exists,
-        "rag_rebuild_on_start": RAG_REBUILD_ON_START,
-        "rag_top_k": RAG_TOP_K,
+        "rag_rebuild_on_start": RAG_REBUILD_ON_START
     }
 
 # =========================
