@@ -5,7 +5,7 @@ Rule 1 — Replace SELECT SINGLE * with explicit field list
 ---------------------------------------------------------
 - What to do:
   * Change `SELECT SINGLE * FROM ...` to `SELECT SINGLE <field_list> FROM ...`.
-  * Prefer `SELECT SINGLE` over `SELECT ... UP TO 1 ROWS` when fetching one row.
+  * Prefer `SELECT SINGLE` over `SELECT ... UP TO 1 ROWS` when fetching one row by (full) key.
 
 - Why:
   * Safer, clearer, avoids pulling unused columns and keeps result structure stable.
@@ -47,3 +47,26 @@ After (correct):
 Rationale:
 - ABAP TYPE p length is bytes (1..16), not digits. LENGTH 23 is invalid.
 - Using DDIC amount types (e.g., DMBTR) aligns with AFLE-compliant precision/scale and DB mappings.
+
+
+Rule 3 — Do NOT add ORDER BY to SELECT SINGLE
+---------------------------------------------
+- What to do:
+  * Do **not** append any `ORDER BY` clause to `SELECT SINGLE`.
+  * If you fetch one row **by full primary key**, use `SELECT SINGLE ... WHERE <full key>`.
+- Why:
+  * `SELECT SINGLE` is intended for key-based, deterministic access; adding `ORDER BY` is semantically wrong and misleading.
+
+Examples:
+Before (anti-pattern):
+  SELECT SINGLE * FROM mara
+         WHERE matnr = lv_matnr
+         ORDER BY ersda DESC
+         INTO wa_mara.
+
+After (key-based, deterministic):
+  SELECT SINGLE matnr meins mtart ersda FROM mara
+         INTO CORRESPONDING FIELDS OF wa_mara
+         WHERE matnr = lv_matnr.  " Added By PwcYYYY-MM-DD
+
+
