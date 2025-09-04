@@ -1,0 +1,49 @@
+ABAP Syntax Remediation Rules
+================================
+
+Rule 1 — Replace SELECT SINGLE * with explicit field list
+---------------------------------------------------------
+- What to do:
+  * Change `SELECT SINGLE * FROM ...` to `SELECT SINGLE <field_list> FROM ...`.
+  * Prefer `SELECT SINGLE` over `SELECT ... UP TO 1 ROWS` when fetching one row.
+
+- Why:
+  * Safer, clearer, avoids pulling unused columns and keeps result structure stable.
+
+Examples:
+Before:
+  SELECT SINGLE * FROM mara WHERE matnr = lv_matnr INTO wa_mara.
+
+After:
+  SELECT SINGLE matnr meins mtart FROM mara
+         INTO CORRESPONDING FIELDS OF wa_mara
+         WHERE matnr = lv_matnr.  " Added By PwcYYYY-MM-DD
+
+Before (anti-pattern):
+  SELECT * FROM mara INTO wa_mara
+         WHERE matnr = lv_matnr
+         UP TO 1 ROWS.
+  ENDSELECT.
+
+After:
+  SELECT SINGLE matnr meins mtart FROM mara
+         INTO CORRESPONDING FIELDS OF wa_mara
+         WHERE matnr = lv_matnr.  " Added By PwcYYYY-MM-DD
+
+
+Rule 2 — Do not declare AFLE amount variables as TYPE p LENGTH 23 DECIMALS 2
+----------------------------------------------------------------------------
+- What to do:
+  * For AFLE amount fields, do not use TYPE p LENGTH 23 DECIMALS 2 (invalid: P length max is 16).
+  * Use the DDIC amount element (e.g., DMBTR) always for AFLE amount variables.
+
+Examples:
+Before (wrong):
+  DATA lv_amount TYPE p LENGTH 23 DECIMALS 2.   " WRONG: P length > 16 bytes
+
+After (correct):
+  DATA lv_amount TYPE dmbtr.                    " Added By PwcYYYY-MM-DD
+
+Rationale:
+- ABAP TYPE p length is bytes (1..16), not digits. LENGTH 23 is invalid.
+- Using DDIC amount types (e.g., DMBTR) aligns with AFLE-compliant precision/scale and DB mappings.
