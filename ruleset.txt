@@ -189,3 +189,23 @@ After (Correct Usage with lines( )):
   IF lines( lt_matnr ) > 0.
     " ... some logic ...
   ENDIF.   " Added By PwcYYYY-MM-DD
+
+Rule 9 — Do Not Use CONCATENATE for Simple String Assembly; Use String Templates Instead.
+-----------------------------------------------------------------------------------
+What to do:
+-Replace any use of the CONCATENATE statement for string assembly with ABAP string templates (|...|) and string expressions.
+-String templates provide clearer syntax, better readability, and reduce the risk of errors with separators.
+
+Examples:
+-Before (Using CONCATENATE Statement):
+  CONCATENATE 'Material Type' wa_mat-mtype 'material code' wa_matnr-mcode ' Material Number' wa_matnr-matnr INTO lv_msg SEPARATED BY space.
+
+-After (Correct Usage with String Template):
+  lv_msg = |{ 'Material Type' && wa_mat-mtype && 'material code' && wa_matnr-mcode && ' Material Number' && wa_matnr-matnr }|.  " Added By PwcYYYY-MM-DD
+
+Examples:
+-Before (Using CONCATENATE to Join Fields with Hyphen):
+  CONCATENATE wa_header-docnum wa_header-bukrs wa_header-gjahr INTO lv_key SEPARATED BY '-'.
+
+-After (Correct Usage with String Template):
+  lv_key = |{ wa_header-docnum }-{ wa_header-bukrs }-{ wa_header-gjahr }|.  " Added By PwcYYYY-MM-DD
