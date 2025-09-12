@@ -209,3 +209,39 @@ Examples:
 
 -After (Correct Usage with String Template):
   lv_key = |{ wa_header-docnum }-{ wa_header-bukrs }-{ wa_header-gjahr }|.  " Added By PwcYYYY-MM-DD
+
+Rule 10 — Do Not Use Classic Offset/Length Notation (var+off(len)); Use substring( ) Instead
+-------------------------------------------------------------------------------------------
+- What to do:
+  * Replace any use of the classic ABAP offset/length substring notation (`variable+offset(length)`) with the modern `substring( )` function.
+  * Always declare an intermediate CHAR variable of the correct length to store the substring result before comparisons, WHERE conditions, or logic.
+
+- Why:
+  * `var+off(len)` is considered legacy and harder to maintain.
+  * `substring( )` provides explicit parameters (val, off, len), improving readability and preventing subtle bugs.
+
+Examples:
+Before:
+  IF wa-matnr+2(3) NE wa-ummat+4(3).
+    " ... logic ...
+  ENDIF.
+
+After:
+  DATA lv_wa_matnr TYPE char3.    " Added By PwcYYYY-MM-DD
+  DATA lv_wa_ummat TYPE char3.    " Added By PwcYYYY-MM-DD
+
+  lv_wa_matnr = substring( val = wa_matnr off = 2 len = 3 ).
+  lv_wa_ummat = substring( val = wa_ummat off = 4 len = 3 ).
+
+  IF lv_wa_matnr NE lv_wa_ummat.
+    " ... logic ...
+  ENDIF.
+
+Before (in WHERE clause):
+  SELECT matnr ummat FROM mara INTO TABLE lt_mara WHERE ummat = ls_mara-ummat+2(5).
+
+After:
+  DATA lv_ls_ummat TYPE char5.       " Added By PwcYYYY-MM-DD
+  lv_ls_ummat = substring( val = ls_mara-ummat off = 2 len = 5 ).
+
+  SELECT matnr ummat FROM mara INTO TABLE lt_mara WHERE ummat = lv_ls_ummat.  " Added By PwcYYYY-MM-DD
