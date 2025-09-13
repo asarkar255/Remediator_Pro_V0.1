@@ -246,200 +246,268 @@ After:
 
   SELECT matnr ummat FROM mara INTO TABLE lt_mara WHERE ummat = lv_ls_ummat.  " Added By PwcYYYY-MM-DD
   
-  ABAP Syntax Remediation Rules — Remove Subqueries by Splitting into Separate Queries
-============================================================================================
+ABAP Open SQL (S/4HANA) — Joins, Subqueries, and Staged Selects
+=================================================================
 
 Scope
 -----
-These rules target ABAP Open SQL patterns that use (or attempt to use) subqueries, e.g.:
-- IN ( SELECT ... )
-- EXISTS ( SELECT ... )
-- Scalar subqueries in the WHERE/SELECT list (not supported in ECC Open SQL)
-- Correlated subqueries
-The goal is to replace them with separate, ECC-safe statements that are clear, performant, and testable.
+These rules modernize the earlier “remove subqueries” guidance for S/4HANA.
+In S/4HANA (ABAP 7.4+), Open SQL supports subqueries such as IN ( SELECT … )
+and EXISTS ( SELECT … ). You should **prefer a single set-based statement**
+(JOIN or supported subquery) and only fall back to staged selects with
+FOR ALL ENTRIES (FAE) when needed for clarity or performance.
 
-General Principles
-------------------
-- Prefer **JOIN** when a single result set is needed and the relationship is straightforward.
-- When JOIN is not feasible (e.g., need a value list), split into **two steps**:
-  1) Select the driving values into an internal table.
-  2) Use **FOR ALL ENTRIES IN** (FAE) to filter the main query.
-- Always guard FAE with `IF it[] IS NOT INITIAL.` and **deduplicate** keys before FAE.
-- Avoid nested SELECTs inside loops; use set-based statements.
-- Use explicit field lists (no SELECT *).  Keep ECC-safe syntax (no @, no inline DATA for ECC).
-- Add `" Added By PwcYYYY-MM-DD` to each changed/added line in examples.
+General Principles (S/4HANA)
+----------------------------
+- Prefer **JOIN** when a single result set is needed and relationships are clear.
+- **Subqueries (IN / EXISTS)** are supported and often more readable than FAE.
+- Use staged selects + **FAE only as a fallback** (e.g., to avoid row explosion, or when
+  the relationship is not conveniently joinable).
+- Keep queries **set-based**. Avoid nested SELECTs inside loops.
+- Use **explicit field lists** (avoid SELECT * in application code).
+- Use **modern Open SQL syntax**:
+  - Comma-separated field lists in SELECT and ORDER BY.
+  - Escape host variables with **@**.
+  - Use `INTO TABLE @it_tab` or `INTO CORRESPONDING FIELDS OF TABLE @it_tab` as needed.
+  - Inline declarations (e.g., `INTO TABLE @DATA(lt_tab)`) are allowed.
+- Prefer **CDS views** (released interfaces) over direct table access when available.
+- Verify cardinality and indexing; measure with SQL Monitor / PlanViz when in doubt.
 
-Rule 11 — Replace IN (SELECT …) with FAE (two-step)
---------------------------------------------------
+S/4HANA Syntax Essentials
+-------------------------
+- Example (field list + @-escapes + ORDER BY with commas):
+  SELECT a~vbeln, a~vkorg, a~erdat
+    FROM vbak AS a
+    WHERE a~vkorg = @p_vkorg
+    ORDER BY a~erdat DESC
+    INTO TABLE @DATA(lt_vbak).
+
+- Do **not** add ORDER BY to SELECT SINGLE. Use key access or ORDER BY … UP TO 1 ROWS instead.
+
+Rule 11 — Replace IN (SELECT …) with JOIN or keep subquery (FAE last)
+---------------------------------------------------------------------
 Before (subquery):
-  SELECT * FROM vbak
-         INTO TABLE lt_vbak
-         WHERE vkorg = p_vkorg
-           AND vbeln IN ( SELECT vbeln FROM vbap WHERE matnr = p_matnr ).
+  SELECT *
+    FROM vbak
+    INTO TABLE @DATA(lt_vbak)
+    WHERE vkorg = @p_vkorg
+      AND vbeln IN ( SELECT vbeln FROM vbap WHERE matnr = @p_matnr ).
 
-After (split into two steps, ECC-safe):
-  DATA: lt_vbap_keys TYPE STANDARD TABLE OF vbap-vbeln WITH DEFAULT KEY.              " Added By PwcYYYY-MM-DD
-  SELECT vbeln FROM vbap INTO TABLE lt_vbap_keys WHERE matnr = p_matnr.               " Added By PwcYYYY-MM-DD
-  DELETE ADJACENT DUPLICATES FROM lt_vbap_keys.                                       " Added By PwcYYYY-MM-DD
-  IF lt_vbap_keys[] IS NOT INITIAL.                                                   " Added By PwcYYYY-MM-DD
-    SELECT vbeln vkorg erdat FROM vbak                                                " Added By PwcYYYY-MM-DD
-      INTO TABLE lt_vbak                                                              " Added By PwcYYYY-MM-DD
-      FOR ALL ENTRIES IN lt_vbap_keys                                                 " Added By PwcYYYY-MM-DD
-      WHERE vkorg = p_vkorg AND vbeln = lt_vbap_keys-table_line.                      " Added By PwcYYYY-MM-DD
-  ENDIF.                                                                              " Added By PwcYYYY-MM-DD
+Preferred (JOIN):
+  SELECT a~vbeln, a~vkorg, a~erdat
+    FROM vbak AS a
+    INNER JOIN vbap AS b ON b~vbeln = a~vbeln
+    WHERE a~vkorg = @p_vkorg
+      AND b~matnr = @p_matnr
+    INTO TABLE @DATA(lt_vbak).
+
+Alternative (keep IN-subquery; supported and clear):
+  SELECT vbeln, vkorg, erdat
+    FROM vbak
+    WHERE vkorg = @p_vkorg
+      AND vbeln IN ( SELECT vbeln FROM vbap WHERE matnr = @p_matnr )
+    INTO TABLE @lt_vbak.
+
+Fallback (two-step + FAE; use when JOIN/subquery would multiply rows or hurt readability):
+  SELECT vbeln
+    FROM vbap
+    WHERE matnr = @p_matnr
+    INTO TABLE @DATA(lt_vbap_keys).
+
+  SORT lt_vbap_keys BY vbeln.
+  DELETE ADJACENT DUPLICATES FROM lt_vbap_keys COMPARING vbeln.
+
+  IF lt_vbap_keys IS NOT INITIAL.
+    SELECT vbeln, vkorg, erdat
+      FROM vbak
+      FOR ALL ENTRIES IN @lt_vbap_keys
+      WHERE vkorg = @p_vkorg
+        AND vbeln = @lt_vbap_keys-vbeln
+      INTO TABLE @lt_vbak.
+  ENDIF.
 
 Notes:
-- Use the single-field table type `TABLE OF vbap-vbeln` for memory efficiency.
-- `table_line` is ECC-safe for elementary table types; otherwise reference the component name.
-- Always deduplicate key table to reduce DB load.
+- Use single-field key tables (e.g., TABLE OF vbap-vbeln) for memory efficiency.
+- Always deduplicate the driving key table before FAE.
 
-Rule 12 — Replace EXISTS(SELECT …) with prebuilt key list + FAE
---------------------------------------------------------------
-Before (subquery EXISTS):
-  SELECT * FROM ekko INTO TABLE lt_ekko
-   WHERE bukrs = p_bukrs
-     AND EXISTS ( SELECT * FROM ekpo WHERE ekpo~ebeln = ekko~ebeln AND matnr = p_matnr ).
+Rule 12 — Replace EXISTS(SELECT …) with JOIN or keep EXISTS (FAE last)
+---------------------------------------------------------------------
+Before (EXISTS):
+  SELECT *
+    FROM ekko
+    INTO TABLE @DATA(lt_ekko)
+    WHERE bukrs = @p_bukrs
+      AND EXISTS ( SELECT * FROM ekpo
+                   WHERE ekpo~ebeln = ekko~ebeln
+                     AND matnr = @p_matnr ).
 
-After (split):
-  DATA: lt_ekpo_keys TYPE STANDARD TABLE OF ekpo-ebeln WITH DEFAULT KEY.              " Added By PwcYYYY-MM-DD
-  SELECT ebeln FROM ekpo INTO TABLE lt_ekpo_keys WHERE matnr = p_matnr.               " Added By PwcYYYY-MM-DD
-  DELETE ADJACENT DUPLICATES FROM lt_ekpo_keys.                                       " Added By PwcYYYY-MM-DD
-  IF lt_ekpo_keys[] IS NOT INITIAL.                                                   " Added By PwcYYYY-MM-DD
-    SELECT ebeln bukrs bedat FROM ekko                                                " Added By PwcYYYY-MM-DD
-      INTO TABLE lt_ekko                                                              " Added By PwcYYYY-MM-DD
-      FOR ALL ENTRIES IN lt_ekpo_keys                                                 " Added By PwcYYYY-MM-DD
-      WHERE bukrs = p_bukrs AND ebeln = lt_ekpo_keys-table_line.                      " Added By PwcYYYY-MM-DD
-  ENDIF.                                                                              " Added By PwcYYYY-MM-DD
+Preferred (EXISTS, stays as-is and is supported):
+  SELECT ebeln, bukrs, bedat
+    FROM ekko AS a
+    WHERE bukrs = @p_bukrs
+      AND EXISTS ( SELECT * FROM ekpo AS b
+                   WHERE b~ebeln = a~ebeln
+                     AND b~matnr = @p_matnr )
+    INTO TABLE @lt_ekko.
 
-Rule 13 — Replace scalar subquery in WHERE with temp variable
-------------------------------------------------------------
-Pattern (not supported in ECC Open SQL):
-  SELECT * FROM mara INTO TABLE lt_mara
-   WHERE mtart = ( SELECT mtart FROM marc WHERE matnr = mara~matnr AND werks = p_werks ).
+Alternative (JOIN):
+  SELECT a~ebeln, a~bukrs, a~bedat
+    FROM ekko AS a
+    INNER JOIN ekpo AS b ON b~ebeln = a~ebeln
+    WHERE a~bukrs = @p_bukrs
+      AND b~matnr = @p_matnr
+    INTO TABLE @lt_ekko.
 
-Refactor (JOIN preferred if 1:1; else split):
-  "* Option A: INNER JOIN when 1:1 per key                                                 " Added By PwcYYYY-MM-DD
-  SELECT a~matnr a~mtart b~werks                                                            " Added By PwcYYYY-MM-DD
-    FROM mara AS a INNER JOIN marc AS b ON b~matnr = a~matnr AND b~werks = p_werks          " Added By PwcYYYY-MM-DD
-    INTO TABLE lt_result                                                                     " Added By PwcYYYY-MM-DD
-    WHERE a~mtart = b~mtart.                                                                 " Added By PwcYYYY-MM-DD
+Fallback (two-step + FAE):
+  SELECT ebeln
+    FROM ekpo
+    WHERE matnr = @p_matnr
+    INTO TABLE @DATA(lt_ekpo_keys).
 
-  "* Option B: Split when join would multiply rows                                          " Added By PwcYYYY-MM-DD
-  DATA: lt_marc_keys TYPE STANDARD TABLE OF marc-mtart WITH DEFAULT KEY.                    " Added By PwcYYYY-MM-DD
-  SELECT mtart FROM marc INTO TABLE lt_marc_keys WHERE werks = p_werks.                     " Added By PwcYYYY-MM-DD
-  DELETE ADJACENT DUPLICATES FROM lt_marc_keys.                                             " Added By PwcYYYY-MM-DD
-  IF lt_marc_keys[] IS NOT INITIAL.                                                         " Added By PwcYYYY-MM-DD
-    SELECT matnr mtart FROM mara INTO TABLE lt_mara                                         " Added By PwcYYYY-MM-DD
-      FOR ALL ENTRIES IN lt_marc_keys                                                       " Added By PwcYYYY-MM-DD
-      WHERE mtart = lt_marc_keys-table_line.                                                " Added By PwcYYYY-MM-DD
-  ENDIF.                                                                                    " Added By PwcYYYY-MM-DD
+  SORT lt_ekpo_keys BY ebeln.
+  DELETE ADJACENT DUPLICATES FROM lt_ekpo_keys COMPARING ebeln.
 
-Rule 14 — Replace correlated subqueries with JOIN or staged selects
-------------------------------------------------------------------
+  IF lt_ekpo_keys IS NOT INITIAL.
+    SELECT ebeln, bukrs, bedat
+      FROM ekko
+      FOR ALL ENTRIES IN @lt_ekpo_keys
+      WHERE bukrs = @p_bukrs
+        AND ebeln = @lt_ekpo_keys-ebeln
+      INTO TABLE @lt_ekko.
+  ENDIF.
+
+Rule 13 — Scalar subquery in WHERE: avoid; use JOIN or staged selects
+---------------------------------------------------------------------
+Pattern (scalar subquery in WHERE):
+  SELECT *
+    FROM mara
+    INTO TABLE @DATA(lt_mara)
+    WHERE mtart = ( SELECT mtart FROM marc
+                    WHERE matnr = mara~matnr AND werks = @p_werks ).
+
+Preferred (JOIN; 1:1 relationship):
+  SELECT a~matnr, a~mtart, b~werks
+    FROM mara AS a
+    INNER JOIN marc AS b
+      ON b~matnr = a~matnr AND b~werks = @p_werks
+    WHERE a~mtart = b~mtart
+    INTO TABLE @DATA(lt_result).
+
+Fallback (staged + FAE when JOIN would multiply rows):
+  SELECT mtart
+    FROM marc
+    WHERE werks = @p_werks
+    INTO TABLE @DATA(lt_marc_keys).
+
+  SORT lt_marc_keys BY mtart.
+  DELETE ADJACENT DUPLICATES FROM lt_marc_keys COMPARING mtart.
+
+  IF lt_marc_keys IS NOT INITIAL.
+    SELECT matnr, mtart
+      FROM mara
+      FOR ALL ENTRIES IN @lt_marc_keys
+      WHERE mtart = @lt_marc_keys-mtart
+      INTO TABLE @lt_mara.
+  ENDIF.
+
+Rule 14 — Correlated subqueries → JOIN or staged selects
+-------------------------------------------------------
 Before (correlated subquery):
-  SELECT * FROM kna1 INTO TABLE lt_kna1
-   WHERE land1 = ( SELECT land1 FROM t001 WHERE t001~bukrs = kna1~kunnr(4) ).
+  SELECT *
+    FROM kna1
+    INTO TABLE @DATA(lt_kna1)
+    WHERE land1 = ( SELECT land1 FROM t001 WHERE t001~bukrs = kna1~kunnr(4) ).
 
-After (JOIN or staged key):
-  "* If relationship is deterministic and joinable                                          " Added By PwcYYYY-MM-DD
-  SELECT a~kunnr a~name1 b~land1                                                            " Added By PwcYYYY-MM-DD
-    FROM kna1 AS a INNER JOIN t001 AS b ON b~bukrs = a~kunnr(4)                              " Added By PwcYYYY-MM-DD
-    INTO TABLE lt_kna1.                                                                      " Added By PwcYYYY-MM-DD
+Preferred (JOIN):
+  SELECT a~kunnr, a~name1, b~land1
+    FROM kna1 AS a
+    INNER JOIN t001 AS b ON b~bukrs = a~kunnr(4)
+    INTO TABLE @lt_kna1.
 
-  "* If join not desired, split                                                              " Added By PwcYYYY-MM-DD
-  DATA: lt_bukrs TYPE STANDARD TABLE OF t001-bukrs WITH DEFAULT KEY.                        " Added By PwcYYYY-MM-DD
-  "* Build bukrs keys from customers (derive a~kunnr(4) in ABAP if needed)                   " Added By PwcYYYY-MM-DD
-  LOOP AT lt_kna1 ASSIGNING <ls>.                                                             " Added By PwcYYYY-MM-DD
-    APPEND <ls>-kunnr(4) TO lt_bukrs.                                                         " Added By PwcYYYY-MM-DD
-  ENDLOOP.                                                                                   " Added By PwcYYYY-MM-DD
-  DELETE ADJACENT DUPLICATES FROM lt_bukrs.                                                  " Added By PwcYYYY-MM-DD
-  IF lt_bukrs[] IS NOT INITIAL.                                                              " Added By PwcYYYY-MM-DD
-    SELECT bukrs land1 FROM t001 INTO TABLE lt_t001                                          " Added By PwcYYYY-MM-DD
-      FOR ALL ENTRIES IN lt_bukrs WHERE bukrs = lt_bukrs-table_line.                         " Added By PwcYYYY-MM-DD
-  ENDIF.                                                                                     " Added By PwcYYYY-MM-DD
+Fallback (staged keys + FAE):
+  " Build @lt_bukrs from customers as needed (e.g., substring of kunnr)
+  " Then:
+  SELECT bukrs, land1
+    FROM t001
+    FOR ALL ENTRIES IN @lt_bukrs
+    WHERE bukrs = @lt_bukrs-bukrs
+    INTO TABLE @DATA(lt_t001).
 
 Rule 15 — Guardrails for FOR ALL ENTRIES (FAE)
----------------------------------------------
-- Always check `IF it[] IS NOT INITIAL.` before FAE to avoid full table scan.
-- Deduplicate the driving table: `DELETE ADJACENT DUPLICATES FROM it.`
-- Ensure the driving table has only the columns used in the `WHERE` equality predicates.
-- Prefer equality conditions (`=`) for FAE; range/IN on the right side is not supported.
-- Be mindful of NULL semantics: FAE skips rows where the driving fields are initial.
-- Use package size for very large result sets and consider secondary indices.
+----------------------------------------------
+- Always check: `IF it[] IS NOT INITIAL.` before FAE to avoid full-table scans.
+- Deduplicate the driving table (SORT …; DELETE ADJACENT DUPLICATES …).
+- The driving table should contain **only** the columns used in equality predicates.
+- Prefer equality (`=`) in the FAE WHERE; ranges/IN on the right side are not supported.
+- FAE skips rows where any driving field is initial—ensure keys are populated.
+- For very large data sets, consider batching (PACKAGE SIZE) and check secondary indices.
 
-Rule 16 — Replace SELECT list subqueries with prefetch + READ TABLE
-------------------------------------------------------------------
+Rule 16 — SELECT list subqueries are not supported → prefetch + READ TABLE or JOIN
+----------------------------------------------------------------------------------
 Before (pseudo-scalar in field list):
-  " Not supported in ECC Open SQL
   SELECT matnr,
-         ( SELECT maktg FROM makt WHERE makt~matnr = mara~matnr AND spras = sy-langu ) AS maktg
-    FROM mara INTO TABLE lt_out.
+         ( SELECT maktg FROM makt
+           WHERE makt~matnr = mara~matnr AND spras = @sy-langu ) AS maktg
+    FROM mara INTO TABLE @DATA(lt_out).
 
-After (prefetch + read):
-  DATA: lt_mara TYPE TABLE OF mara,                                                          " Added By PwcYYYY-MM-DD
-        lt_makt TYPE TABLE OF makt,                                                          " Added By PwcYYYY-MM-DD
-        ls_makt TYPE makt.                                                                   " Added By PwcYYYY-MM-DD
-  SELECT matnr FROM mara INTO TABLE lt_mara.                                                 " Added By PwcYYYY-MM-DD
-  IF lt_mara[] IS NOT INITIAL.                                                               " Added By PwcYYYY-MM-DD
-    SELECT matnr maktg FROM makt INTO TABLE lt_makt WHERE spras = sy-langu.                  " Added By PwcYYYY-MM-DD
-    SORT lt_makt BY matnr.                                                                   " Added By PwcYYYY-MM-DD
-    LOOP AT lt_mara ASSIGNING <ls_mara>.                                                     " Added By PwcYYYY-MM-DD
-      READ TABLE lt_makt INTO ls_makt WITH KEY matnr = <ls_mara>-matnr BINARY SEARCH.        " Added By PwcYYYY-MM-DD
-      IF sy-subrc = 0.                                                                       " Added By PwcYYYY-MM-DD
-        "* combine into output row as needed                                                 " Added By PwcYYYY-MM-DD
-      ENDIF.                                                                                 " Added By PwcYYYY-MM-DD
-    ENDLOOP.                                                                                 " Added By PwcYYYY-MM-DD
-  ENDIF.                                                                                     " Added By PwcYYYY-MM-DD
+Preferred (JOIN):
+  SELECT a~matnr, b~maktg
+    FROM mara AS a
+    INNER JOIN makt AS b ON b~matnr = a~matnr AND b~spras = @sy-langu
+    INTO TABLE @DATA(lt_out).
+
+Alternative (prefetch + READ TABLE):
+  SELECT matnr FROM mara INTO TABLE @DATA(lt_mara).
+  IF lt_mara IS NOT INITIAL.
+    SELECT matnr, maktg
+      FROM makt
+      WHERE spras = @sy-langu
+      INTO TABLE @DATA(lt_makt).
+    SORT lt_makt BY matnr.
+    LOOP AT lt_mara ASSIGNING FIELD-SYMBOL(<ls_mara>).
+      READ TABLE lt_makt ASSIGNING FIELD-SYMBOL(<ls_makt>)
+        WITH KEY matnr = <ls_mara>-matnr BINARY SEARCH.
+      IF sy-subrc = 0.
+        " combine into output row as required
+      ENDIF.
+    ENDLOOP.
+  ENDIF.
 
 Rule 17 — Prefer JOIN when it preserves row cardinality and clarity
-------------------------------------------------------------------
-- Use INNER/LEFT OUTER JOIN in a single SELECT when: 
-  * the join keys are known and indexed,
-  * the result cardinality is acceptable (no row explosion), and
-  * you need columns from both tables together.
-- When JOIN introduces duplicates or business logic is staged, use split + FAE instead.
+-------------------------------------------------------------------
+- Use INNER/LEFT OUTER JOIN when:
+  * join keys are indexed,
+  * result cardinality is acceptable (no uncontrolled row multiplication),
+  * you need columns from multiple sources in one pass.
+- Use staged selects + FAE when JOIN/subquery would explode rows or obscure intent.
 
-Performance & Correctness Checklist
------------------------------------
-- Field lists only (no SELECT *). Ensure alignment with target structures.
-- Check secondary indices for both steps to avoid full scans.
-- Avoid SELECT … ENDSELECT with nested reads; use INTO TABLE + further processing.
-- For massive key lists, consider batching or buffering.
-- Unit test the refactor: results (set & counts) must match the original intent.
+Performance & Correctness Checklist (S/4HANA)
+---------------------------------------------
+- Use field lists only; align with target structures.
+- Avoid SELECT … ENDSELECT nesting; use `INTO TABLE` then process in ABAP.
+- Check secondary indices and cardinality; test with realistic volumes.
+- Consider aggregates and GROUP BY for “top”/distinct logic instead of client-side filtering.
+- Use ORDER BY with comma-separated fields; for “top-1 by criterion”, use
+  `ORDER BY … [DESC] UP TO 1 ROWS` (not SELECT SINGLE with ORDER BY).
+- Prefer released CDS views and push-down calculations (calculations on DB where appropriate).
 
-Rule 18 — Add draft/active predicates when fields exist (PwC landscape)
------------------------------------------------------------------------
-**Landscape assertion (customer-specific):**
-- In this system, **VBRP** and **VBRK** include a `DRAFT` flag column (CHAR1, space = active).
-- Therefore, for any **SELECT** that reads from `VBRP AS b` and/or `VBRK AS c`, **append** both predicates:
-  - `AND b~draft = space`
-  - `AND c~draft = space`
-- Keep **ECC-safe syntax** (legacy Open SQL—no commas in field lists, no `@` host variable escapes).
-
-**Do not invent fields:** If a table/view does not contain a draft flag, **do not** add such predicates.
-
-Examples (apply to all similar SELECTs):
-Before:
-  SELECT b~posnr ... c~vbeln ...
-    FROM vbrp AS b INNER JOIN vbrk AS c ON b~vbeln = c~vbeln
-    INTO CORRESPONDING FIELDS OF TABLE it_final
-    WHERE c~vbtyp IN ('M','P','N','O','S','K')
-      AND c~vbeln IN so_vbeln
-      AND c~valdt NE '00000000'.
-
-After:
-  SELECT b~posnr ... c~vbeln ...
-    FROM vbrp AS b INNER JOIN vbrk AS c ON b~vbeln = c~vbeln
-    INTO CORRESPONDING FIELDS OF TABLE it_final
-    WHERE c~vbtyp IN ('M','P','N','O','S','K')
-      AND c~vbeln IN so_vbeln
-      AND c~valdt NE '00000000'
-      AND b~draft = space    " Added By Pwc2025-09-12
-      AND c~draft = space.   " Added By Pwc2025-09-12
-
-Rule 19 — CDS/RAP entities: use IsActiveEntity instead of DRAFT (conditional)
+Rule 18 — Draft/active predicates when such columns exist (customer-specific)
 -----------------------------------------------------------------------------
-When selecting from a **draft-enabled CDS/RAP entity**, filter for active rows using:
-  - `WHERE IsActiveEntity = abap_true` (or `'X'`), not a `DRAFT` column.
+If your transparent tables/views physically contain a DRAFT flag (e.g., VBRP/VBRK in a
+customer landscape), and you only want active rows, append:
+  AND b~draft = space
+  AND c~draft = space
+Only add these predicates if the columns truly exist; never invent fields.
 
-Do **not** add `IsActiveEntity` to classic transparent tables (e.g., VBRP, VBRK, BKPF) unless the entity is a CDS view exposing it.
+Rule 19 — CDS/RAP entities: use IsActiveEntity (not DRAFT)
+----------------------------------------------------------
+When selecting from a draft-enabled CDS/RAP entity, filter for active rows using:
+  WHERE IsActiveEntity = abap_true
+Do **not** add IsActiveEntity to classic transparent tables unless exposed by the CDS view.
+
+Summary
+-------
+- In S/4HANA, JOINs and supported subqueries (IN, EXISTS) are first-class tools.
+- Use staged selects + FAE only when JOIN/subquery is impractical.
+- Keep code modern (comma-separated lists, @ host variable escapes, explicit fields).
+- Validate with performance tools and prefer released CDS views where possible.
