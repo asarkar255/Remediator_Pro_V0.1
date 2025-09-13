@@ -493,11 +493,12 @@ Performance & Correctness Checklist (S/4HANA)
 
 Rule 18 — Draft/active predicates when such columns exist (customer-specific)
 -----------------------------------------------------------------------------
+When llm prompt ask to add draft = space always add it for the table mentioned(Mandatory)
 If your transparent tables/views physically contain a DRAFT flag (e.g., VBRP/VBRK in a
 customer landscape), and you only want active rows, append:
   AND b~draft = space
   AND c~draft = space
-Only add these predicates if the columns truly exist; never invent fields.
+
 
 Rule 19 — CDS/RAP entities: use IsActiveEntity (not DRAFT)
 ----------------------------------------------------------
