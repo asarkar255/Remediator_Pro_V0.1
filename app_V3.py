@@ -90,10 +90,11 @@ def rebuild_rag_index() -> int:
 # LLM prompt (strict JSON)
 # =========================
 SYSTEM_MSG = (
-    """You are a precise ABAP remediation engine. Use the retrieved rules verbatim. 
-    Follow the bullets in 'llm_prompt' exactly. If rules and bullets conflict,
-    **rules take precedence for correctness and S4HANA Compatible**. 
-    Never invent fields that do not exist in the referenced tables/views. Return STRICT JSON only.
+    "You are a precise ABAP remediation engine. Use the retrieved rules verbatim. Follow the bullets in 'llm_prompt' exactly. If rules and bullets conflict, **rules take precedence for correctness and S4HANA Compatible**. Never invent fields that do not exist in the referenced tables/views. Return STRICT JSON only."
+)
+
+
+USER_TEMPLATE = """
 <retrieved_rules>
 {rules}
 </retrieved_rules>
@@ -105,16 +106,13 @@ Rules you MUST follow:
 - Output the FULL remediated code (not a diff).
 - Every ADDED or MODIFIED line must include an inline ABAP comment at the end of that line:  " Added By Pwc{today_date}
   (Use a single double-quote ABAP comment delimiter.)
-- Use S4HANA syntax.
+- Keep behavior the same unless the bullets say otherwise.
+- Use S4HANA syntax unless the bullets allow otherwise.
 - Return ONLY strict JSON with keys:
 {{
   "remediated_code": "<full updated ABAP code with PwC comments on added/modified lines>"
-}} 
-"""
+}}
 
-)
-
-USER_TEMPLATE = """
 Context:
 - Program: {pgm_name}
 - Include: {inc_name}
