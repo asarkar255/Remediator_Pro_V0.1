@@ -23,7 +23,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY environment variable is required.")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")  # e.g., "gpt-5"
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")  # e.g., "gpt-5"
 CHROMA_DIR   = os.getenv("CHROMA_DIR", "chroma_rules")  # persisted vector store
 RAG_RULES_DIR= os.getenv("RAG_RULES_DIR", "rag_rules")  # put your rules *.txt/*.md here
 RAG_REBUILD_ON_START = os.getenv("RAG_REBUILD_ON_START", "false").lower() == "true"
@@ -100,7 +100,6 @@ SYSTEM_MSG = (
 
 Remediate the ABAP code EXACTLY following the bullet points in 'llm_prompt'.
 Rules you MUST follow:
-- Apply conditional rules (e.g., draft/active predicates) **when the relevant columns exist** in the referenced tables/views.
 - Replace legacy/wrong code with corrected ABAP per the rules and bullets.
 - Output the FULL remediated code (not a diff).
 - Every ADDED or MODIFIED line must include an inline ABAP comment at the end of that line:  " Added By Pwc{today_date}
